@@ -20,7 +20,7 @@ from winTesterForK import winTesterForK
 
 from game_types import TTT, FIAR, Cassini
 
-TIME_PER_MOVE = 1.0 # In seconds
+TIME_PER_MOVE = 3.0 # In seconds
 INITIAL_STATE = TTT.initial_state
 
 ALLOW_CERTAIN_IMPORTS = True
@@ -188,9 +188,9 @@ def test():
     # which is a "twin".
 
     #import yourUWNetID_KInARow as h
-    import RandomPlayer as h
-    px = h.OurAgent()
-    po = h.OurAgent(twin=True)
+    from A2377948_KInARow import OurAgent
+    px = OurAgent()
+    po = OurAgent(twin=True)
     set_players(px, po)
     print("Players are set.")
     print("Now let's run the game.")
