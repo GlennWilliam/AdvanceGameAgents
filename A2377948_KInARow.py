@@ -61,10 +61,11 @@ class OurAgent(KAgent):
             opponent_nickname,
             expected_time_per_move = 0.1, # Time limits can be
                                           # changed mid-game by the game master.
-            utterances_matter=True):      # If False, just return 'OK' for each utterance,
+            utterances_matter=True,# If False, just return 'OK' for each utterance,
                                           # or something simple and quick to compute
                                           # and do not import any LLM or special APIs.
                                           # During the tournament, this will be False..
+            apis_ok=True):      
         """
         The game master calls this once before the game starts (and may call it again
         in mid-game if parameters change).
@@ -80,6 +81,8 @@ class OurAgent(KAgent):
         self.side = what_side_to_play
         self.opponent = opponent_nickname
         self.time_per_move = expected_time_per_move
+        self.utterances_matter = utterances_matter
+        self.apis_ok = apis_ok
         self.init_zobrist_table()
 
         return 'OK'
@@ -145,6 +148,15 @@ class OurAgent(KAgent):
                     f"Zobrist: {self.zobrist_hits_this_turn}/{self.zobrist_read_attempts_this_turn} hits, "
                     f"{self.zobrist_writes_this_turn} writes. "
                     f"I choose move {best_move}!")
+    
+
+        if self.apis_ok:
+            response_text = self.generate_response(
+                f"I'm playing {self.current_game_type.short_name}. My last move was {best_move}. "
+                f"{new_remark} How would a strategic AI respond to its opponent? Limit your response to seven sentences."
+            )
+        else:
+            response_text = f"{new_remark} Let's see what you do next!"
 
         # If for some reason we did not find any legal moves, just return "pass":
         if best_move is None:
@@ -152,7 +164,7 @@ class OurAgent(KAgent):
 
         # Apply the chosen move to get the new state:
         new_state = self.apply_move(current_state, best_move)
-        return [[best_move, new_state], new_remark]
+        return [[best_move, resulting_state], response_text]
 
     def minimax_wrapper(self, state, depth, use_alpha_beta=True, use_zobrist_hashing=False):
         """
@@ -502,5 +514,23 @@ class OurAgent(KAgent):
                     hash_value ^= self.zobrist_table[(r, c)][piece]
 
         return hash_value
+    
+    def generate_response(self, prompt):
+        if not self.apis_ok:
+            return "I'm afraid my AI capabilities are limited at the moment."
+
+        try:
+            from google import genai
+
+            client = genai.Client(api_key="api key")
+
+            completion = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+                )
+            return completion.text
+
+        except Exception as e:
+            return f"Oops, I encountered an issue: {str(e)}"
 
     
