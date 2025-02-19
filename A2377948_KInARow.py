@@ -14,6 +14,7 @@ TO PROVIDE A GOOD STRUCTURE FOR YOUR IMPLEMENTATION.
 import copy
 from agent_base import KAgent
 from game_types import State, Game_Type
+import random
 
 AUTHORS = 'Glenn William and Lezhi Liu' 
 
@@ -29,9 +30,13 @@ class OurAgent(KAgent):
         self.playing = "don't know yet" # e.g., "X" or "O".
         self.alpha_beta_cutoffs_this_turn = -1
         self.num_static_evals_this_turn = -1
-        self.zobrist_table_num_entries_this_turn = -1
-        self.zobrist_table_num_hits_this_turn = -1
+        self.zobrist_table_num_entries_this_turn = 0
+        self.zobrist_table_num_hits_this_turn = 0
+        self.zobrist_writes_this_turn = 0 
         self.current_game_type = None
+        
+        self.zobrist_table = {}
+        self.transposition_table = {}
 
         # Track statistics for the final remark:
         self.num_static_evals_this_turn = 0
@@ -75,6 +80,7 @@ class OurAgent(KAgent):
         self.side = what_side_to_play
         self.opponent = opponent_nickname
         self.time_per_move = expected_time_per_move
+        self.init_zobrist_table()
 
         return 'OK'
 
@@ -84,7 +90,7 @@ class OurAgent(KAgent):
               time_limit=1000,
               autograding=False,
               use_alpha_beta=True,
-              use_zobrist_hashing=False,
+              use_zobrist_hashing=True,
               max_ply=3,
               special_static_eval_fn=None):
         """
@@ -98,6 +104,9 @@ class OurAgent(KAgent):
         self.num_alpha_beta_cutoffs_this_turn = 0
         self.num_leaves_explored_this_turn = 0
         self.num_nodes_expanded_this_turn = 0
+        self.zobrist_writes_this_turn = 0
+        self.zobrist_read_attempts_this_turn = 0
+        self.zobrist_hits_this_turn = 0
 
         # Ensure my_eval_function is always initialized
         if special_static_eval_fn is not None:
@@ -105,18 +114,36 @@ class OurAgent(KAgent):
         else:
             self.my_eval_function = self.static_eval  
 
+        zobrist_hash = None
+        
+        if use_zobrist_hashing:
+            zobrist_hash = self.compute_zobrist_hash(current_state)
+            self.zobrist_read_attempts_this_turn += 1
+            if zobrist_hash in self.transposition_table:
+                self.zobrist_hits_this_turn += 1
+                best_move, best_score, depth = self.transposition_table[zobrist_hash]
+                return [[best_move, self.apply_move(current_state, best_move)],
+                        f"Using cached evaluation: {best_score} (depth={depth})"]
+
         # Now call minimax
         best_score, best_move, resulting_state = self.minimax_wrapper(
             current_state, 
             depth=max_ply,
-            use_alpha_beta=use_alpha_beta
+            use_alpha_beta=use_alpha_beta,
+            use_zobrist_hashing=use_zobrist_hashing
         )
+
+        if zobrist_hash is not None:
+            self.transposition_table[zobrist_hash] = (best_move, best_score, max_ply)
+            self.zobrist_writes_this_turn += 1
 
         # Construct a remark about the search process:
         new_remark = (f"My {'alpha-beta' if use_alpha_beta else 'minimax'} search "
                     f"expanded {self.num_nodes_expanded_this_turn} nodes and "
                     f"performed {self.num_static_evals_this_turn} static evaluations "
                     f"with {self.num_alpha_beta_cutoffs_this_turn} alpha-beta cutoffs. "
+                    f"Zobrist: {self.zobrist_hits_this_turn}/{self.zobrist_read_attempts_this_turn} hits, "
+                    f"{self.zobrist_writes_this_turn} writes. "
                     f"I choose move {best_move}!")
 
         # If for some reason we did not find any legal moves, just return "pass":
@@ -127,7 +154,7 @@ class OurAgent(KAgent):
         new_state = self.apply_move(current_state, best_move)
         return [[best_move, new_state], new_remark]
 
-    def minimax_wrapper(self, state, depth, use_alpha_beta=True):
+    def minimax_wrapper(self, state, depth, use_alpha_beta=True, use_zobrist_hashing=False):
         """
         Wrapper that calls the actual minimax or alpha-beta function
         and returns (score, best_move, best_state).
@@ -135,7 +162,7 @@ class OurAgent(KAgent):
         if use_alpha_beta:
             alpha = float('-inf')
             beta = float('inf')
-            score, move, new_state = self.alphabeta_search(state, depth, alpha, beta)
+            score, move, new_state = self.alphabeta_search(state, depth, alpha, beta, use_zobrist_hashing)
         else:
             score, move, new_state = self.minimax_search(state, depth)
         return (score, move, new_state)
@@ -214,11 +241,20 @@ class OurAgent(KAgent):
 
         return (best_val, best_move, best_state)
 
-    def alphabeta_search(self, state, depth, alpha, beta):
+    def alphabeta_search(self, state, depth, alpha, beta, use_zobrist_hashing):
         """
         Driver for alpha-beta search from the root.
         Returns (value, best_move, best_state).
         """
+
+        zobrist_hash = None
+        if use_zobrist_hashing:
+            zobrist_hash = self.compute_zobrist_hash(state)
+            self.zobrist_read_attempts_this_turn += 1
+            if zobrist_hash in self.transposition_table:
+                self.zobrist_hits_this_turn += 1
+                return self.transposition_table[zobrist_hash]
+            
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
         who = state.whose_move
@@ -348,5 +384,123 @@ class OurAgent(KAgent):
         new_state.change_turn()
         
         return new_state
+    
+    def static_eval(self, state, game_type=None):
+        """
+        Evaluates the current state and returns the score which a high score is better for
+        X and vice versa
+        """
+        board = state.board
+        k = game_type.k if game_type else 3  
+        nR, nC = len(board), len(board[0])
+        score = 0
+
+        for r in range(nR):
+            for c in range(nC):
+                if board[r][c] != '-':
+                    for dr, dc in [(1, 0), (0, 1), (1, 1), (1, -1)]:  
+                        x_count, o_count, space_count, open_ends, forbidden_count = self.count_consecutive(r,
+                                                                                 c, dr, dc, board, k, nR, nC)
+
+                        #already reach K
+                        if x_count == k:
+                            return 10000  
+                        if o_count == k:
+                            return -10000  
+
+                        #K-1
+                        if x_count == k-1 and space_count > 0:
+                            if open_ends == 2:  # both ends open
+                                score += 2000
+                            elif open_ends == 1:  # one end open
+                                score += 1000
+                            else:  # both ends closed
+                                score += 500
+
+                        if o_count == k-1 and space_count > 0:
+                            if open_ends == 2:
+                                score -= 2000
+                            elif open_ends == 1:
+                                score -= 1000
+                            else:
+                                score -= 500
+
+                        # other consecutives
+                        if x_count > 0 and o_count == 0:  
+                            score += (10 ** x_count) * (space_count + 1)
+                        if o_count > 0 and x_count == 0:  
+                            score -= (10 ** o_count) * (space_count + 1)
+
+                        # Forbidden Squares
+                        if forbidden_count > 0:
+                            score -= forbidden_count * 200
+
+        return score
+
+    
+    def count_consecutive(self, r, c, dr, dc, board, k, nR, nC):
+        """
+        From (r,c), travel in the direction of (dr, dc) to find consecutive
+        Xs and Os, as well as checking if the ends of these consecutive Xs and
+        Os have opponents on their two ends
+        """
+        x_count, o_count, space_count, forbidden_count = 0, 0, 0, 0
+        open_ends = 0  # 0 = both ends closed, 1 = one end closed, 2 = both ends open
+
+        for i in range(k):  
+            nr, nc = r + i * dr, c + i * dc
+            if 0 <= nr < nR and 0 <= nc < nC:
+                if board[nr][nc] == 'X':
+                    x_count += 1
+                elif board[nr][nc] == 'O':
+                    o_count += 1
+                elif board[nr][nc] == '-':  # Forbidden Square
+                    forbidden_count += 1
+                else:
+                    space_count += 1  
+
+        # check left side open
+        left_r, left_c = r - dr, c - dc
+        if 0 <= left_r < nR and 0 <= left_c < nC:
+            if board[left_r][left_c] == ' ':
+                open_ends += 1
+            elif board[left_r][left_c] == '-':
+                forbidden_count += 1
+
+        # check right side open
+        right_r, right_c = r + k * dr, c + k * dc
+        if 0 <= right_r < nR and 0 <= right_c < nC:
+            if board[right_r][right_c] == ' ':
+                open_ends += 1
+            elif board[right_r][right_c] == '-':
+                forbidden_count += 1
+
+        return x_count, o_count, space_count, open_ends, forbidden_count
+    
+    def init_zobrist_table(self):
+        if self.current_game_type is None:
+            return
+        
+        nR, nC = self.current_game_type.n, self.current_game_type.m
+        pieces = ['X', 'O', ' ']
+
+        self.zobrist_table = {}
+        for r in range(nR):
+            for c in range(nC):
+                self.zobrist_table[(r, c)] = {p: random.getrandbits(64) for p in pieces}
+
+    
+    def compute_zobrist_hash(self, state):
+        hash_value = 0
+        board = state.board
+        nR, nC = len(board), len(board[0])
+
+        for r in range(nR):
+            for c in range(nC):
+                piece = board[r][c]
+                if piece in self.zobrist_table[(r, c)]:
+                    hash_value ^= self.zobrist_table[(r, c)][piece]
+
+        return hash_value
 
     
