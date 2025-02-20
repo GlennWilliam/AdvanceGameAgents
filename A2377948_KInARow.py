@@ -34,6 +34,8 @@ class OurAgent(KAgent):
         self.zobrist_table_num_hits_this_turn = 0
         self.zobrist_writes_this_turn = 0 
         self.current_game_type = None
+        self.game_history = []
+        self.apis_ok = False
         
         self.zobrist_table = {}
         self.transposition_table = {}
@@ -61,10 +63,11 @@ class OurAgent(KAgent):
             opponent_nickname,
             expected_time_per_move = 0.1, # Time limits can be
                                           # changed mid-game by the game master.
-            utterances_matter=True):      # If False, just return 'OK' for each utterance,
+            utterances_matter=True,# If False, just return 'OK' for each utterance,
                                           # or something simple and quick to compute
                                           # and do not import any LLM or special APIs.
                                           # During the tournament, this will be False..
+            apis_ok=True):      
         """
         The game master calls this once before the game starts (and may call it again
         in mid-game if parameters change).
@@ -80,6 +83,8 @@ class OurAgent(KAgent):
         self.side = what_side_to_play
         self.opponent = opponent_nickname
         self.time_per_move = expected_time_per_move
+        self.utterances_matter = utterances_matter
+        self.apis_ok = apis_ok
         self.init_zobrist_table()
 
         return 'OK'
@@ -133,6 +138,7 @@ class OurAgent(KAgent):
             use_zobrist_hashing=use_zobrist_hashing
         )
 
+
         if zobrist_hash is not None:
             self.transposition_table[zobrist_hash] = (best_move, best_score, max_ply)
             self.zobrist_writes_this_turn += 1
@@ -146,13 +152,26 @@ class OurAgent(KAgent):
                     f"{self.zobrist_writes_this_turn} writes. "
                     f"I choose move {best_move}!")
 
+        utterance = self.generate_utterance(current_state, current_remark, best_move, new_remark)
+
+        # if self.apis_ok:
+        #     response_text = self.generate_response(
+        #         f"I'm playing {self.current_game_type.short_name}. My last move was {best_move}. "
+        #         f"{new_remark} How would a strategic AI respond to its opponent? Limit your response to seven sentences."
+        #     )
+        # else:
+        #     response_text = f"{new_remark} Let's see what you do next!"
+            
+
         # If for some reason we did not find any legal moves, just return "pass":
         if best_move is None:
             return [[None, current_state], "I cannot move!"]
+        
+        self.game_history.append((best_move, current_state.whose_move))
 
         # Apply the chosen move to get the new state:
         new_state = self.apply_move(current_state, best_move)
-        return [[best_move, new_state], new_remark]
+        return [[best_move, resulting_state], utterance]
 
     def minimax_wrapper(self, state, depth, use_alpha_beta=True, use_zobrist_hashing=False):
         """
@@ -251,9 +270,15 @@ class OurAgent(KAgent):
         if use_zobrist_hashing:
             zobrist_hash = self.compute_zobrist_hash(state)
             self.zobrist_read_attempts_this_turn += 1
+
             if zobrist_hash in self.transposition_table:
                 self.zobrist_hits_this_turn += 1
-                return self.transposition_table[zobrist_hash]
+                cached_value, cached_move, cached_depth = self.transposition_table[zobrist_hash]
+                if cached_move is not None:
+                    best_state = self.apply_move(state, cached_move)
+                else:
+                    best_state = None
+                return (cached_value, cached_move, best_state)
             
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
@@ -264,6 +289,10 @@ class OurAgent(KAgent):
             val = self.my_eval_function(state, self.current_game_type)
             self.num_static_evals_this_turn += 1
             self.num_leaves_explored_this_turn += 1
+
+            if use_zobrist_hashing and zobrist_hash is not None:
+                self.transposition_table[zobrist_hash] = (val, None, depth)
+                self.zobrist_writes_this_turn += 1
             return (val, None, None)
 
         best_move = None
@@ -283,7 +312,6 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
         else:
             # minimizing
             value = float('inf')
@@ -298,13 +326,27 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
+
+        # storing scores for future references
+        if use_zobrist_hashing and zobrist_hash is not None:
+            self.transposition_table[zobrist_hash] = (value, best_move, depth)
+            self.zobrist_writes_this_turn += 1
+
+        return (value, best_move, best_state)
 
     def alphabeta_search_next(self, state, depth, alpha, beta):
         """
         The recursive inner part of alpha-beta search.
         Returns (value, best_move, best_state).
         """
+        zobrist_hash = None
+        if self.transposition_table is not None:
+            zobrist_hash = self.compute_zobrist_hash(state)
+            self.zobrist_read_attempts_this_turn += 1
+            if zobrist_hash in self.transposition_table:
+                self.zobrist_hits_this_turn += 1
+                return self.transposition_table[zobrist_hash]
+            
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
         who = state.whose_move
@@ -317,6 +359,11 @@ class OurAgent(KAgent):
 
             self.num_static_evals_this_turn += 1
             self.num_leaves_explored_this_turn += 1
+            # storing scores at the leaf level
+            if zobrist_hash is not None:
+                self.transposition_table[zobrist_hash] = (val, None, depth)
+                self.zobrist_writes_this_turn += 1
+
             return (val, None, None)
 
         if who == 'X':
@@ -335,7 +382,6 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
         else:
             # Minimizing
             value = float('inf')
@@ -352,7 +398,11 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
+        if zobrist_hash is not None:
+            self.transposition_table[zobrist_hash] = (value, best_move, depth)
+            self.zobrist_writes_this_turn += 1
+
+        return (value, best_move, best_state)
 
     def get_legal_moves(self, state):
         """
@@ -375,10 +425,12 @@ class OurAgent(KAgent):
         (which is (row, col)) in 'state'.
         """
         # Create a new state using the 'old' argument
-        new_state = State(old=state)  # Correctly passing the current state as 'old'
+        new_state = copy.deepcopy(state)
+        # new_state = State(old=state)  # Correctly passing the current state as 'old'
         
         row, col = move
         new_state.board[row][col] = state.whose_move  # Apply the move
+
         
         # Switch whose move it is
         new_state.change_turn()
@@ -482,7 +534,7 @@ class OurAgent(KAgent):
             return
         
         nR, nC = self.current_game_type.n, self.current_game_type.m
-        pieces = ['X', 'O', ' ']
+        pieces = ['X', 'O', ' ', '-']
 
         self.zobrist_table = {}
         for r in range(nR):
@@ -500,7 +552,69 @@ class OurAgent(KAgent):
                 piece = board[r][c]
                 if piece in self.zobrist_table[(r, c)]:
                     hash_value ^= self.zobrist_table[(r, c)][piece]
+                else:
+                    print(f"⚠️ WARNING: Zobrist table missing entry for ({r}, {c})")  
 
         return hash_value
+            
+    def generate_utterance(self, 
+                        current_state, 
+                        opponent_remark, 
+                        chosen_move, 
+                        stats_summary):
+        """
+        Return an in-character utterance as a string. If the opponent remark is exactly the
+        two questions, use the default template, else use the llm api if it can be used, otherwise
+        return a general persona-based response.
+        """
+        # two questions
+        if "Tell me how you did that" in opponent_remark:
+            return (f"You dare to question my brilliance? Fine. "
+                    f"{stats_summary} "
+                    "Is that detailed enough for you?")
+
+        elif "What's your take on the game so far?" in opponent_remark:
+            story = "Here's the move history:\n"
+            for i, (mv, who_moved) in enumerate(self.game_history):
+                story += f"Move {i+1}: Player {who_moved} placed on {mv}.\n"
+            current_score = self.static_eval(current_state, self.current_game_type)
+            if current_score > 0:
+                winner_prediction = "X has the upper hand!"
+            elif current_score < 0:
+                winner_prediction = "O has the upper hand!"
+            else:
+                winner_prediction = "It's very balanced right now!"
+            story += f"I predict {winner_prediction}"
+            return story
+        # llm
+        if self.apis_ok:
+            return self.generate_llm_utterance(
+                current_state, opponent_remark, chosen_move, stats_summary
+            )
+        # general
+        return (f"I choose {chosen_move}, obviously. {stats_summary}. "
+                "Better luck next time, mortal!")
+    
+    def generate_llm_utterance(self, current_state, opponent_remark, chosen_move, stats_summary):
+        prompt = (f"You are TicTacTroll, an annoyingly snarky AI.\n"
+                f"Opponent just said: '{opponent_remark}'.\n"
+                f"You decided to play the move {chosen_move}.\n"
+                f"Here are your search statistics: {stats_summary}.\n"
+                f"Respond in 5 sentences, dripping with arrogance.\n")
+        try:
+            from google import genai
+            client = genai.Client(api_key="api key")
+            completion = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt
+                    )
+            return completion.text
+        except Exception as e:
+            return (f"Technically, I'd have more to say, but something went wrong with the LLM. "
+                    f"Anyway, I'm unstoppable and playing {chosen_move}.")
+    
+
+
+
 
     
