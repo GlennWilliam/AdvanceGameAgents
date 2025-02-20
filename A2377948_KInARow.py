@@ -80,10 +80,6 @@ class OurAgent(KAgent):
         We'll save info about the game, the side to play, and time limits.
         For the autograder's tests, simply return 'OK' if everything is in order.
         """
-        if utterances_matter:
-           pass
-           # Optionally, import your LLM API here.
-           # Then you can use it to help create utterances.
 
         self.current_game_type = game_type
         self.side = what_side_to_play
@@ -596,8 +592,11 @@ class OurAgent(KAgent):
 
         # 3. Otherwise, produce a default or "normal" snarky/troll utterance
         else:
-            llm_utterance = self.generate_llm_utterance(current_state, best_move, opponent_remark_lower, stats_summary)
-            return llm_utterance
+            if self.apis_ok == True:
+                llm_utterance = self.generate_llm_utterance(current_state, best_move, opponent_remark_lower, stats_summary)
+                return llm_utterance
+            else:
+                return f"Oh, you're still here? I was hoping you'd have given up by now. Anyway, I'm making my move {best_move}."
         
     def generate_detailed_explanation(self, stats_summary, algorithm):
         if algorithm == "alpha-beta":
