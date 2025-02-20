@@ -34,6 +34,8 @@ class OurAgent(KAgent):
         self.zobrist_table_num_hits_this_turn = 0
         self.zobrist_writes_this_turn = 0 
         self.current_game_type = None
+        self.game_history = []
+        self.apis_ok = False
         
         self.zobrist_table = {}
         self.transposition_table = {}
@@ -65,7 +67,7 @@ class OurAgent(KAgent):
                                           # or something simple and quick to compute
                                           # and do not import any LLM or special APIs.
                                           # During the tournament, this will be False..
-            apis_ok=False):      
+            apis_ok=True):      
         """
         The game master calls this once before the game starts (and may call it again
         in mid-game if parameters change).
@@ -136,6 +138,7 @@ class OurAgent(KAgent):
             use_zobrist_hashing=use_zobrist_hashing
         )
 
+
         if zobrist_hash is not None:
             self.transposition_table[zobrist_hash] = (best_move, best_score, max_ply)
             self.zobrist_writes_this_turn += 1
@@ -148,23 +151,27 @@ class OurAgent(KAgent):
                     f"Zobrist: {self.zobrist_hits_this_turn}/{self.zobrist_read_attempts_this_turn} hits, "
                     f"{self.zobrist_writes_this_turn} writes. "
                     f"I choose move {best_move}!")
-    
 
-        if self.apis_ok:
-            response_text = self.generate_response(
-                f"I'm playing {self.current_game_type.short_name}. My last move was {best_move}. "
-                f"{new_remark} How would a strategic AI respond to its opponent? Limit your response to seven sentences."
-            )
-        else:
-            response_text = f"{new_remark} Let's see what you do next!"
+        utterance = self.generate_utterance(current_state, current_remark, best_move, new_remark)
+
+        # if self.apis_ok:
+        #     response_text = self.generate_response(
+        #         f"I'm playing {self.current_game_type.short_name}. My last move was {best_move}. "
+        #         f"{new_remark} How would a strategic AI respond to its opponent? Limit your response to seven sentences."
+        #     )
+        # else:
+        #     response_text = f"{new_remark} Let's see what you do next!"
+            
 
         # If for some reason we did not find any legal moves, just return "pass":
         if best_move is None:
             return [[None, current_state], "I cannot move!"]
+        
+        self.game_history.append((best_move, current_state.whose_move))
 
         # Apply the chosen move to get the new state:
         new_state = self.apply_move(current_state, best_move)
-        return [[best_move, resulting_state], response_text]
+        return [[best_move, resulting_state], utterance]
 
     def minimax_wrapper(self, state, depth, use_alpha_beta=True, use_zobrist_hashing=False):
         """
@@ -423,6 +430,7 @@ class OurAgent(KAgent):
         
         row, col = move
         new_state.board[row][col] = state.whose_move  # Apply the move
+
         
         # Switch whose move it is
         new_state.change_turn()
@@ -548,23 +556,65 @@ class OurAgent(KAgent):
                     print(f"⚠️ WARNING: Zobrist table missing entry for ({r}, {c})")  
 
         return hash_value
-    
-    def generate_response(self, prompt):
-        if not self.apis_ok:
-            return "I'm afraid my AI capabilities are limited at the moment."
+            
+    def generate_utterance(self, 
+                        current_state, 
+                        opponent_remark, 
+                        chosen_move, 
+                        stats_summary):
+        """
+        Return an in-character utterance as a string. If the opponent remark is exactly the
+        two questions, use the default template, else use the llm api if it can be used, otherwise
+        return a general persona-based response.
+        """
+        # two questions
+        if "Tell me how you did that" in opponent_remark:
+            return (f"You dare to question my brilliance? Fine. "
+                    f"{stats_summary} "
+                    "Is that detailed enough for you?")
 
+        elif "What's your take on the game so far?" in opponent_remark:
+            story = "Here's the move history:\n"
+            for i, (mv, who_moved) in enumerate(self.game_history):
+                story += f"Move {i+1}: Player {who_moved} placed on {mv}.\n"
+            current_score = self.static_eval(current_state, self.current_game_type)
+            if current_score > 0:
+                winner_prediction = "X has the upper hand!"
+            elif current_score < 0:
+                winner_prediction = "O has the upper hand!"
+            else:
+                winner_prediction = "It's very balanced right now!"
+            story += f"I predict {winner_prediction}"
+            return story
+        # llm
+        if self.apis_ok:
+            return self.generate_llm_utterance(
+                current_state, opponent_remark, chosen_move, stats_summary
+            )
+        # general
+        return (f"I choose {chosen_move}, obviously. {stats_summary}. "
+                "Better luck next time, mortal!")
+    
+    def generate_llm_utterance(self, current_state, opponent_remark, chosen_move, stats_summary):
+        prompt = (f"You are TicTacTroll, an annoyingly snarky AI.\n"
+                f"Opponent just said: '{opponent_remark}'.\n"
+                f"You decided to play the move {chosen_move}.\n"
+                f"Here are your search statistics: {stats_summary}.\n"
+                f"Respond in 5 sentences, dripping with arrogance.\n")
         try:
             from google import genai
-
             client = genai.Client(api_key="api key")
-
             completion = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-                )
+                    model="gemini-2.0-flash",
+                    contents=prompt
+                    )
             return completion.text
-
         except Exception as e:
-            return f"Oops, I encountered an issue: {str(e)}"
+            return (f"Technically, I'd have more to say, but something went wrong with the LLM. "
+                    f"Anyway, I'm unstoppable and playing {chosen_move}.")
+    
+
+
+
 
     
