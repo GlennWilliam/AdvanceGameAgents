@@ -16,6 +16,10 @@ from agent_base import KAgent
 from game_types import State, Game_Type
 
 AUTHORS = 'Glenn William and Lezhi Liu' 
+import time
+
+class TimeoutException(Exception):
+    pass
 
 class OurAgent(KAgent):
     def __init__(self, twin=False):
@@ -78,26 +82,21 @@ class OurAgent(KAgent):
 
         return 'OK'
 
-    def make_move(self, 
-              current_state, 
-              current_remark, 
-              time_limit=1000,
-              autograding=False,
-              use_alpha_beta=True,
-              use_zobrist_hashing=False,
-              max_ply=3,
+    def make_move(self, current_state, current_remark, time_limit=1.0, autograding=False,
+              use_alpha_beta=True, use_zobrist_hashing=False, max_ply=4,
               special_static_eval_fn=None):
         """
-        The heart of the agent. We do a depth-limited minimax (alpha-beta, etc...)
-        out to max_ply. We call the special_static_eval_fn if provided (for autograding),
-        else we call self.static_eval().
+        Modified make_move that uses iterative deepening with time checks.
+        time_limit is in seconds.
         """
-        
-        # Reset per-turn stats:
-        self.num_static_evals_this_turn = 0
-        self.num_alpha_beta_cutoffs_this_turn = 0
-        self.num_leaves_explored_this_turn = 0
-        self.num_nodes_expanded_this_turn = 0
+        start_time = time.time()
+        best_move = None
+        best_state = None
+        current_depth = 1
+
+        # Store timing info for recursive functions.
+        self.search_start_time = start_time
+        self.allowed_time = time_limit
 
         # Ensure my_eval_function is always initialized
         if special_static_eval_fn is not None:
@@ -105,46 +104,98 @@ class OurAgent(KAgent):
         else:
             self.my_eval_function = self.static_eval  
 
-        # Now call minimax
-        best_score, best_move, resulting_state = self.minimax_wrapper(
-            current_state, 
-            depth=max_ply,
-            use_alpha_beta=use_alpha_beta
-        )
+        try:
+            while current_depth <= max_ply:
+                # Check if there's still time before starting a new depth.
+                if time.time() - start_time >= time_limit:
+                    raise TimeoutException()
+                if use_alpha_beta:
+                    score, move, state = self.alphabeta_search(current_state, current_depth, float('-inf'), float('inf'))
+                else:
+                    score, move, state = self.minimax_search(current_state, current_depth)
+                best_score = score
+                best_move, best_state = move, state
+                current_depth += 1
+        except TimeoutException:
+            print("Time limit reached, returning best move from last complete search depth.")
 
-        # Construct a remark about the search process:
-        new_remark = (f"My {'alpha-beta' if use_alpha_beta else 'minimax'} search "
-                    f"expanded {self.num_nodes_expanded_this_turn} nodes and "
-                    f"performed {self.num_static_evals_this_turn} static evaluations "
-                    f"with {self.num_alpha_beta_cutoffs_this_turn} alpha-beta cutoffs. "
-                    f"I choose move {best_move}!")
-
-        # If for some reason we did not find any legal moves, just return "pass":
         if best_move is None:
-            return [[None, current_state], "I cannot move!"]
+            # Fallback in case no move was computed.
+            legal_moves = self.get_legal_moves(current_state)
+            best_move = legal_moves[0] if legal_moves else None
+            best_state = self.apply_move(current_state, best_move) if best_move is not None else current_state
 
-        # Apply the chosen move to get the new state:
-        new_state = self.apply_move(current_state, best_move)
-        return [[best_move, new_state], new_remark]
+        new_remark = (
+            f"My {'alpha-beta' if use_alpha_beta else 'minimax'} search expanded {self.num_nodes_expanded_this_turn} nodes, "
+            f"performed {self.num_static_evals_this_turn} static evaluations, explored {self.num_leaves_explored_this_turn} leaves, "
+            f"with {self.num_alpha_beta_cutoffs_this_turn} alpha-beta cutoffs. "
+            f"Reached depth {current_depth - 1}. Best move: {best_move} with score {best_score}"
+        )
+        return [[best_move, best_state], new_remark]
 
-    def minimax_wrapper(self, state, depth, use_alpha_beta=True):
-        """
-        Wrapper that calls the actual minimax or alpha-beta function
-        and returns (score, best_move, best_state).
-        """
-        if use_alpha_beta:
-            alpha = float('-inf')
-            beta = float('inf')
-            score, move, new_state = self.alphabeta_search(state, depth, alpha, beta)
+
+    def alphabeta_search(self, state, depth, alpha, beta):
+        # Check for time limit in every recursive call.
+        if time.time() - self.search_start_time >= self.allowed_time:
+            raise TimeoutException("Time limit exceeded")
+            
+        moves = self.get_legal_moves(state)
+        self.num_nodes_expanded_this_turn += 1
+        who = state.whose_move
+
+        if not moves or depth == 0:
+            val = self.my_eval_function(state, self.current_game_type)
+            self.num_static_evals_this_turn += 1
+            self.num_leaves_explored_this_turn += 1
+            return (val, None, None)
+
+        best_move = None
+        best_state = None
+
+        if who == 'X':
+            value = float('-inf')
+            for move in moves:
+                next_state = self.apply_move(state, move)
+                child_val, _, _ = self.alphabeta_search(next_state, depth-1, alpha, beta)
+                if child_val > value:
+                    value = child_val
+                    best_move = move
+                    best_state = next_state
+                alpha = max(alpha, value)
+                if alpha >= beta:
+                    self.num_alpha_beta_cutoffs_this_turn += 1
+                    break
+                # Check time after each move.
+                if time.time() - self.search_start_time >= self.allowed_time:
+                    raise TimeoutException("Time limit exceeded")
+            return (value, best_move, best_state)
         else:
-            score, move, new_state = self.minimax_search(state, depth)
-        return (score, move, new_state)
+            value = float('inf')
+            for move in moves:
+                next_state = self.apply_move(state, move)
+                child_val, _, _ = self.alphabeta_search(next_state, depth-1, alpha, beta)
+                if child_val < value:
+                    value = child_val
+                    best_move = move
+                    best_state = next_state
+                beta = min(beta, value)
+                if alpha >= beta:
+                    self.num_alpha_beta_cutoffs_this_turn += 1
+                    break
+                if time.time() - self.search_start_time >= self.allowed_time:
+                    raise TimeoutException("Time limit exceeded")
+            return (value, best_move, best_state)
 
+    
     def minimax_search(self, state, depth):
         """
         Plain minimax without alpha-beta. 
         Return (best_score, best_move, resulting_state_for_that_move).
         """
+        # Check for time limit in every recursive call.
+        if time.time() - self.search_start_time >= self.allowed_time:
+            raise TimeoutException("Time limit exceeded")
+        
         # We do an initial maximizing or minimizing depending on whose move it is:
         who = state.whose_move
         best_val = float('-inf') if who == 'X' else float('inf')
@@ -161,7 +212,7 @@ class OurAgent(KAgent):
 
         for move in moves:
             next_state = self.apply_move(state, move)
-            val, _, _ = self.minimax_search_next(next_state, depth - 1)
+            val, _, _ = self.minimax_search(next_state, depth - 1)
             if who == 'X':
                 if val > best_val:
                     best_val = val
@@ -175,55 +226,20 @@ class OurAgent(KAgent):
 
         return (best_val, best_move, best_state)
 
-    def minimax_search_next(self, state, depth):
+    def minimax_search_with_time(self, state, depth):
         """
-        The recursive (inner) part of minimax: no alpha-beta.
-        Returns (value, None, None) or (value, best_move, best_state).
+        Plain minimax search with a time limit check.
+        Returns (best_score, best_move, resulting_state).
         """
-        who = state.whose_move
-        moves = self.get_legal_moves(state)
-        self.num_nodes_expanded_this_turn += 1
-        if not moves or depth == 0:
-            # Ensure we only pass the correct number of arguments
-            if self.my_eval_function == self.static_eval:
-                val = self.static_eval(state, self.current_game_type)  # Pass both arguments for default function
-            else:
-                val = self.my_eval_function(state)  # Special function only gets 'state'
-                
-            self.num_static_evals_this_turn += 1
-            self.num_leaves_explored_this_turn += 1
-            return (val, None, None)
+        # Check time at the start of this call.
+        if time.time() - self.search_start_time >= self.allowed_time:
+            raise TimeoutException("Time limit exceeded during minimax search.")
 
-        best_val = float('-inf') if who == 'X' else float('inf')
-        best_move = None
-        best_state = None
-
-        for move in moves:
-            next_state = self.apply_move(state, move)
-            val, _, _ = self.minimax_search_next(next_state, depth - 1)
-            if who == 'X':
-                if val > best_val:
-                    best_val = val
-                    best_move = move
-                    best_state = next_state
-            else:
-                if val < best_val:
-                    best_val = val
-                    best_move = move
-                    best_state = next_state
-
-        return (best_val, best_move, best_state)
-
-    def alphabeta_search(self, state, depth, alpha, beta):
-        """
-        Driver for alpha-beta search from the root.
-        Returns (value, best_move, best_state).
-        """
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
         who = state.whose_move
 
-        # If no moves or depth=0 => evaluate & return
+        # Base case: terminal state or maximum depth reached.
         if not moves or depth == 0:
             val = self.my_eval_function(state, self.current_game_type)
             self.num_static_evals_this_turn += 1
@@ -234,89 +250,30 @@ class OurAgent(KAgent):
         best_state = None
 
         if who == 'X':
-            # maximizing
-            value = float('-inf')
+            best_val = float('-inf')
             for move in moves:
                 next_state = self.apply_move(state, move)
-                (child_val, _, _) = self.alphabeta_search_next(next_state, depth-1, alpha, beta)
-                if child_val > value:
-                    value = child_val
+                child_val, _, _ = self.minimax_search_with_time(next_state, depth - 1)
+                if child_val > best_val:
+                    best_val = child_val
                     best_move = move
                     best_state = next_state
-                alpha = max(alpha, value)
-                if alpha >= beta:
-                    self.num_alpha_beta_cutoffs_this_turn += 1
-                    break
-            return (value, best_move, best_state)
+                # Check time after each move.
+                if time.time() - self.search_start_time >= self.allowed_time:
+                    raise TimeoutException("Time limit exceeded during minimax search (maximizing).")
+            return (best_val, best_move, best_state)
         else:
-            # minimizing
-            value = float('inf')
+            best_val = float('inf')
             for move in moves:
                 next_state = self.apply_move(state, move)
-                (child_val, _, _) = self.alphabeta_search_next(next_state, depth-1, alpha, beta)
-                if child_val < value:
-                    value = child_val
+                child_val, _, _ = self.minimax_search_with_time(next_state, depth - 1)
+                if child_val < best_val:
+                    best_val = child_val
                     best_move = move
                     best_state = next_state
-                beta = min(beta, value)
-                if alpha >= beta:
-                    self.num_alpha_beta_cutoffs_this_turn += 1
-                    break
-            return (value, best_move, best_state)
-
-    def alphabeta_search_next(self, state, depth, alpha, beta):
-        """
-        The recursive inner part of alpha-beta search.
-        Returns (value, best_move, best_state).
-        """
-        moves = self.get_legal_moves(state)
-        self.num_nodes_expanded_this_turn += 1
-        who = state.whose_move
-
-        if not moves or depth == 0:
-            if self.my_eval_function == self.static_eval:
-                val = self.static_eval(state, self.current_game_type)
-            else:
-                val = self.my_eval_function(state) 
-
-            self.num_static_evals_this_turn += 1
-            self.num_leaves_explored_this_turn += 1
-            return (val, None, None)
-
-        if who == 'X':
-            # Maximizing
-            value = float('-inf')
-            best_move = None
-            best_state = None
-            for move in moves:
-                next_state = self.apply_move(state, move)
-                (child_val, _, _) = self.alphabeta_search_next(next_state, depth-1, alpha, beta)
-                if child_val > value:
-                    value = child_val
-                    best_move = move
-                    best_state = next_state
-                alpha = max(alpha, value)
-                if alpha >= beta:
-                    self.num_alpha_beta_cutoffs_this_turn += 1
-                    break
-            return (value, best_move, best_state)
-        else:
-            # Minimizing
-            value = float('inf')
-            best_move = None
-            best_state = None
-            for move in moves:
-                next_state = self.apply_move(state, move)
-                (child_val, _, _) = self.alphabeta_search_next(next_state, depth-1, alpha, beta)
-                if child_val < value:
-                    value = child_val
-                    best_move = move
-                    best_state = next_state
-                beta = min(beta, value)
-                if alpha >= beta:
-                    self.num_alpha_beta_cutoffs_this_turn += 1
-                    break
-            return (value, best_move, best_state)
+                if time.time() - self.search_start_time >= self.allowed_time:
+                    raise TimeoutException("Time limit exceeded during minimax search (minimizing).")
+            return (best_val, best_move, best_state)
 
     def get_legal_moves(self, state):
         """
@@ -348,5 +305,136 @@ class OurAgent(KAgent):
         new_state.change_turn()
         
         return new_state
-
     
+    def static_eval(self, state, game_type=None):
+        """
+        Improved static evaluation for K-in-a-Row games.
+        
+        This function examines every contiguous segment of length k in all
+        directions. Each segment is scored based on:
+        - k markers:        win/loss (+/-100)
+        - k-1 markers:      threat (+/-10)
+        - k-2 markers:      minor advantage (+/-1)
+        In addition, if a segment’s open ends are available (i.e., the adjacent 
+        cells in the same direction are empty), a bonus is applied.
+        
+        Finally, a positional weighting bonus is added, rewarding pieces closer 
+        to the board’s center.
+        """
+        board = state.board
+        num_rows = len(board)
+        num_cols = len(board[0])
+        # Use the game type's winning condition if available; default to 3.
+        k = getattr(game_type, "k", 3)
+        score = 0
+
+        # Evaluate horizontal segments.
+        for r in range(num_rows):
+            for c in range(num_cols - k + 1):
+                score += self.evaluate_segment_with_open_ends(board, r, c, 0, 1, k, num_rows, num_cols)
+
+        # Evaluate vertical segments.
+        for c in range(num_cols):
+            for r in range(num_rows - k + 1):
+                score += self.evaluate_segment_with_open_ends(board, r, c, 1, 0, k, num_rows, num_cols)
+
+        # Evaluate diagonals (top-left to bottom-right).
+        for r in range(num_rows - k + 1):
+            for c in range(num_cols - k + 1):
+                score += self.evaluate_segment_with_open_ends(board, r, c, 1, 1, k, num_rows, num_cols)
+
+        # Evaluate anti-diagonals (top-right to bottom-left).
+        for r in range(num_rows - k + 1):
+            for c in range(k - 1, num_cols):
+                score += self.evaluate_segment_with_open_ends(board, r, c, 1, -1, k, num_rows, num_cols)
+
+        # Add positional bonus: cells closer to the center get a bonus.
+        center_r, center_c = num_rows // 2, num_cols // 2
+        for r in range(num_rows):
+            for c in range(num_cols):
+                # A simple weight: the closer a cell is to the center, the higher its bonus.
+                distance = abs(center_r - r) + abs(center_c - c)
+                bonus = (max(num_rows, num_cols) - distance) * 0.1  # adjust factor as needed
+                if board[r][c] == 'X':
+                    score += bonus
+                elif board[r][c] == 'O':
+                    score -= bonus
+
+        return score
+
+    def evaluate_segment_with_open_ends(self, board, r, c, dr, dc, k, num_rows, num_cols):
+        """
+        Evaluate a contiguous segment of length k starting at (r, c) in direction (dr, dc).
+        
+        The base evaluation (via self.evaluate_segment) returns:
+        +100 for k X's, +10 for k-1 X's, +1 for k-2 X's (and similarly negative for O).
+        This function checks the cell immediately before and after the segment (if they exist)
+        and awards an extra bonus if the segment is "open" on one or both sides.
+        """
+        segment = [board[r + i * dr][c + i * dc] for i in range(k)]
+        seg_score = self.evaluate_segment(segment, k)
+        
+        # Winning segments need no extra bonus.
+        if seg_score in (100, -100):
+            return seg_score
+
+        open_bonus = 0
+        # Coordinates for the cell before the segment.
+        pre_r, pre_c = r - dr, c - dc
+        # Coordinates for the cell after the segment.
+        post_r, post_c = r + k * dr, c + k * dc
+
+        left_open = (0 <= pre_r < num_rows and 0 <= pre_c < num_cols and board[pre_r][pre_c] == ' ')
+        right_open = (0 <= post_r < num_rows and 0 <= post_c < num_cols and board[post_r][post_c] == ' ')
+
+        if left_open and right_open:
+            open_bonus = 2
+        elif left_open or right_open:
+            open_bonus = 1
+
+        # If the segment is favorable for X, add the bonus; if for O, subtract it.
+        if seg_score > 0:
+            return seg_score + open_bonus
+        elif seg_score < 0:
+            return seg_score - open_bonus
+        return seg_score
+
+    def evaluate_segment(self, segment, k):
+        """
+        Evaluate a segment of length k.
+        
+        Returns:
+        +100 if the segment has k X's (win for X)
+        +10 if it has k-1 X's (threat for X)
+        +1 if it has k-2 X's (minor advantage for X)
+        Similarly, returns negative values for O.
+        
+        If the segment contains both X and O or any blocked cell ('-'),
+        it is considered contested and returns 0.
+        """
+        if '-' in segment:
+            return 0
+
+        x_count = segment.count('X')
+        o_count = segment.count('O')
+
+        if x_count > 0 and o_count > 0:
+            return 0
+
+        if x_count > 0:
+            if x_count == k:
+                return 100
+            elif x_count == k - 1:
+                return 10
+            elif x_count == k - 2:
+                return 1
+
+        if o_count > 0:
+            if o_count == k:
+                return -100
+            elif o_count == k - 1:
+                return -10
+            elif o_count == k - 2:
+                return -1
+
+        return 0
