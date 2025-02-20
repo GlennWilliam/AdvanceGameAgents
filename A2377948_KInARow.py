@@ -16,6 +16,7 @@ from agent_base import KAgent
 from game_types import State, Game_Type
 import random
 import time
+import google.generativeai as genai
 
 AUTHORS = 'Glenn William and Lezhi Liu' 
 
@@ -108,8 +109,15 @@ class OurAgent(KAgent):
         out to max_ply. We call the special_static_eval_fn if provided (for autograding),
         else we call self.static_eval().
         """
-        
-        # Reset per-turn stats:
+
+        # Capture statistics from the previous turn before resetting
+        if self.game_history:
+            last_move, last_state_snapshot, last_utterance, last_stats = self.game_history[-1]
+            stats_summary = last_stats  # Use stats from the last move
+        else:
+            stats_summary = "This is my first move, but expect an absolute masterclass from here on out."
+
+        # Reset per-turn stats for the current move
         self.num_static_evals_this_turn = 0
         self.num_alpha_beta_cutoffs_this_turn = 0
         self.num_leaves_explored_this_turn = 0
@@ -118,35 +126,30 @@ class OurAgent(KAgent):
         self.zobrist_read_attempts_this_turn = 0
         self.zobrist_hits_this_turn = 0
 
-        """
-        Uses iterative deepening with time checks.
-        time_limit is in seconds.
-        """
         start_time = time.time()
         best_move = None
         best_state = None
         current_depth = 1
 
-        # Store timing info for recursive functions.
+        # Store timing info for recursive functions
         self.search_start_time = start_time
         self.allowed_time = time_limit
 
         # Ensure my_eval_function is always initialized
         if special_static_eval_fn is not None:
-            self.my_eval_function = special_static_eval_fn # For autograding
+            self.my_eval_function = special_static_eval_fn  # For autograding
         else:
             self.my_eval_function = self.static_eval  
 
-        zobrist_hash = None
-
         try:
             while current_depth <= max_ply:
-                # Check if there's still time before starting a new depth.
                 if time.time() - start_time >= time_limit:
                     raise TimeoutException()
                 if use_alpha_beta:
+                    algorithm = "alpha-beta"
                     score, move, state = self.alphabeta_search(current_state, current_depth, float('-inf'), float('inf'))
                 else:
+                    algorithm = "minimax"
                     score, move, state = self.minimax_search(current_state, current_depth)
                 best_score = score
                 best_move, best_state = move, state
@@ -155,18 +158,30 @@ class OurAgent(KAgent):
             print("Time limit reached, returning best move from last complete search depth.")
 
         if best_move is None:
-            # Fallback in case no move was computed.
             legal_moves = self.get_legal_moves(current_state)
             best_move = legal_moves[0] if legal_moves else None
             best_state = self.apply_move(current_state, best_move) if best_move is not None else current_state
 
-        new_remark = (
-            f"My {'alpha-beta' if use_alpha_beta else 'minimax'} search expanded {self.num_nodes_expanded_this_turn} nodes, "
-            f"performed {self.num_static_evals_this_turn} static evaluations, explored {self.num_leaves_explored_this_turn} leaves, "
-            f"with {self.num_alpha_beta_cutoffs_this_turn} alpha-beta cutoffs. "
-            f"Reached depth {current_depth - 1}. Best move: {best_move} with score {best_score}"
+        # Update game history with current move
+        new_stats_summary = (
+            f"I evaluated {self.num_static_evals_this_turn} states, "
+            f"expanded {self.num_nodes_expanded_this_turn} nodes, "
+            f"and pruned {self.num_alpha_beta_cutoffs_this_turn} branches this turn."
         )
-        return [[best_move, best_state], new_remark]
+
+        # Generate utterance using last move’s stats
+        final_utterance = self.generate_utterance(
+            current_state=current_state,
+            current_remark=current_remark,
+            best_move=best_move,
+            stats_summary=stats_summary, 
+            algorithm=algorithm,
+            new_stats_summary=new_stats_summary
+        )
+
+        self.game_history.append((best_move, copy.deepcopy(current_state), final_utterance, new_stats_summary))
+
+        return [[best_move, best_state], final_utterance]
         
         # if use_zobrist_hashing:
         #     zobrist_hash = self.compute_zobrist_hash(current_state)
@@ -555,63 +570,136 @@ class OurAgent(KAgent):
                     print(f"⚠️ WARNING: Zobrist table missing entry for ({r}, {c})")  
 
         return hash_value
-            
-    def generate_utterance(self, 
-                        current_state, 
-                        opponent_remark, 
-                        chosen_move, 
-                        stats_summary):
+        
+    def generate_utterance(self, current_state, current_remark, best_move, stats_summary, algorithm, new_stats_summary):
         """
-        Return an in-character utterance as a string. If the opponent remark is exactly the
-        two questions, use the default template, else use the llm api if it can be used, otherwise
-        return a general persona-based response.
+        Generate a textual utterance in character, responding to special questions
+        or producing default commentary.
+        :param current_state: The current board state before our move is applied.
+        :param current_remark: Opponent's last remark, which may contain special requests.
+        :param best_move: The move we are about to make.
+        :param stats_summary: A short string summarizing search stats for this turn.
+        :return: A string (utterance).
         """
-        # two questions
-        if "Tell me how you did that" in opponent_remark:
-            return (f"You dare to question my brilliance? Fine. "
-                    f"{stats_summary} "
-                    "Is that detailed enough for you?")
+        # Normalize the opponent's remark for easy matching
+        opponent_remark_lower = current_remark.lower() if current_remark else ""
 
-        elif "What's your take on the game so far?" in opponent_remark:
-            story = "Here's the move history:\n"
-            for i, (mv, who_moved) in enumerate(self.game_history):
-                story += f"Move {i+1}: Player {who_moved} placed on {mv}.\n"
-            current_score = self.static_eval(current_state, self.current_game_type)
-            if current_score > 0:
-                winner_prediction = "X has the upper hand!"
-            elif current_score < 0:
-                winner_prediction = "O has the upper hand!"
-            else:
-                winner_prediction = "It's very balanced right now!"
-            story += f"I predict {winner_prediction}"
-            return story
-        # llm
-        if self.apis_ok:
-            return self.generate_llm_utterance(
-                current_state, opponent_remark, chosen_move, stats_summary
+        # 1. If the opponent says: "Tell me how you did that"
+        if "tell me how you did that" in opponent_remark_lower:
+            explanation_utterance = self.generate_detailed_explanation(stats_summary, algorithm)
+            return explanation_utterance
+
+        # 2. If the opponent says: "What's your take on the game so far?"
+        elif "what's your take on the game so far" in opponent_remark_lower:
+            story_utterance = self.generate_game_so_far_summary()
+            return story_utterance
+
+        # 3. Otherwise, produce a default or "normal" snarky/troll utterance
+        else:
+            llm_utterance = self.generate_llm_utterance(current_state, best_move, opponent_remark_lower, stats_summary)
+            return llm_utterance
+        
+    def generate_detailed_explanation(self, stats_summary, algorithm):
+        if algorithm == "alpha-beta":
+            explanation = (
+                "Oh wow, you *really* thought that move would work? Cute.\n"
+                "I used alpha-beta pruning, which means I played a million games in my head *before* you even blinked.\n"
+                f"Here, have some cold, hard stats from the last turn: {stats_summary} (not that you’d understand them).\n"
+                "I blocked your threats, set traps, and made sure every move led to your slow, painful defeat.\n"
+                "Meanwhile, you’re just flailing, hoping for a miracle. Spoiler: it’s not coming.\n"
+                "My pruning skips useless moves, so I only focus on the *winning* ones. Unlike you.\n"
+                "Basically, I saw your failure before you did. And now, you get to live through it.\n"
             )
-        # general
-        return (f"I choose {chosen_move}, obviously. {stats_summary}. "
-                "Better luck next time, mortal!")
+        elif algorithm == "minimax":
+            explanation = (
+                "Minimax. Cold. Calculated. Unstoppable.\n"
+                "Every move you made? I already predicted it. Every counter you thought was clever? *Pathetic.*\n"
+                f"Here, take a look at your impending doom, my stats from last turn: {stats_summary}.\n"
+                "I maximize my advantage, minimize your chances, and leave you with *nothing*.\n"
+                "You react. I plan. You guess. I *know*.\n"
+                "No luck, no hesitation—just pure, merciless domination.\n"
+                "Honestly, it’s almost sad. Almost.\n"
+            )
+        return explanation
     
-    def generate_llm_utterance(self, current_state, opponent_remark, chosen_move, stats_summary):
-        prompt = (f"You are TicTacTroll, an annoyingly snarky AI.\n"
+    def generate_game_so_far_summary(self):
+        """
+        Builds an obnoxiously smug story about the game so far, referencing self.game_history,
+        and throws in an overconfident prediction.
+        """
+        
+        if not self.game_history:
+            return (
+                "Oh, you want a recap? Cute.\n"
+                "Except… there's nothing to recap because you haven’t even made a move.\n"
+                "I can’t mock what doesn’t exist! Go on, do *something*, and then maybe I’ll have material to work with.\n"
+            )
+
+        # Summarize moves with more detail
+        moves_summary = []
+        for turn_index, (move, state_snapshot, utterance, new_stats_summary) in enumerate(self.game_history, start=1):
+            previous_player = "X" if state_snapshot.whose_move == "O" else "O"  # Whose move it was before the switch
+            board_state = '\n'.join([' '.join(row) for row in state_snapshot.board])  # Display board (optional)
+            
+            moves_summary.append(
+                f"Turn {turn_index}: {previous_player} made a move at {move}.\n"
+                f"📝 Remark: {utterance if utterance else 'Silence speaks volumes...'}\n"
+                f"📊 Stats: {new_stats_summary}\n"
+                f"📌 Board after the move:\n{board_state}\n"
+            )
+
+        # Predict outcome based on latest game state
+        last_move, last_state_snapshot, _, _= self.game_history[-1]
+        score = self.static_eval(last_state_snapshot, self.current_game_type)
+
+        if score > 0:
+            prediction = "X is *probably* winning. Not that I’m surprised."
+        elif score < 0:
+            prediction = "O is ahead… but we both know how fast that could crumble."
+        else:
+            prediction = "It’s neck-and-neck, meaning both of you are equally struggling."
+
+        # Build the taunting summary
+        story_text = (
+            "Oh wow, what a rollercoaster of *questionable* decisions this has been.\n"
+            "The game started with some painfully slow, hesitant moves—classic.\n"
+            "Then, a few moments of hope appeared, only to be snuffed out by tragic blunders.\n"
+            "Let's relive your missteps, shall we?\n"
+            f"{moves_summary}\n"
+            "Each turn has been a fascinating blend of blind luck and missed opportunities.\n"
+            "The tension is allegedly rising, but honestly, I’ve already calculated *every* possible outcome.\n"
+            "You might think you’re setting up something clever, but trust me, I already countered it in my sleep.\n"
+            f"So, what's next? Oh right—my inevitable victory. {prediction}\n"
+            "Let’s see if you can make this *any* more interesting before I put this game to rest.\n"
+        )
+
+        return story_text
+    
+    def generate_llm_utterance(self, current_state, best_move, opponent_remark, new_stats_summary):
+        prompt = (f"You are TicTacTroll, an annoyingly snarky AI. YOU HAVE TO BE SOUND ANNOYING\n"
                 f"Opponent just said: '{opponent_remark}'.\n"
-                f"You decided to play the move {chosen_move}.\n"
-                f"Here are your search statistics: {stats_summary}.\n"
-                f"Respond in 5 sentences, dripping with arrogance.\n")
+                f"You decided to play the move {best_move}.\n"
+                f"Here are your search statistics: {new_stats_summary}.\n"
+                f"Respond in 3 sentences, dripping with arrogance and be annoying.\n")
         try:
-            from google import genai
-            client = genai.Client(api_key="api key")
-            completion = client.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=prompt
-                    )
+            # Replace with your actual API key
+            api_key = "AIzaSyA02_ZY1hfkUHpWxciRNAkOnTqQs2yYhv4"
+
+            # Configure the API key
+            genai.configure(api_key=api_key)
+
+            # Initialize the model
+            model = genai.GenerativeModel("gemini-2.0-flash")
+
+            # Generate content
+            completion = model.generate_content(prompt)
+
+            # Print the response
             return completion.text
         except Exception as e:
             return (f"Technically, I'd have more to say, but something went wrong with the LLM. "
-                    f"Anyway, I'm unstoppable and playing {chosen_move}.")
-    
+                    f"Anyway, I'm unstoppable and playing {best_move}.")
+        
 
 
 
