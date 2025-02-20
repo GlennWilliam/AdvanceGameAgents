@@ -65,7 +65,7 @@ class OurAgent(KAgent):
                                           # or something simple and quick to compute
                                           # and do not import any LLM or special APIs.
                                           # During the tournament, this will be False..
-            apis_ok=True):      
+            apis_ok=False):      
         """
         The game master calls this once before the game starts (and may call it again
         in mid-game if parameters change).
@@ -263,9 +263,15 @@ class OurAgent(KAgent):
         if use_zobrist_hashing:
             zobrist_hash = self.compute_zobrist_hash(state)
             self.zobrist_read_attempts_this_turn += 1
+
             if zobrist_hash in self.transposition_table:
                 self.zobrist_hits_this_turn += 1
-                return self.transposition_table[zobrist_hash]
+                cached_value, cached_move, cached_depth = self.transposition_table[zobrist_hash]
+                if cached_move is not None:
+                    best_state = self.apply_move(state, cached_move)
+                else:
+                    best_state = None
+                return (cached_value, cached_move, best_state)
             
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
@@ -276,6 +282,10 @@ class OurAgent(KAgent):
             val = self.my_eval_function(state, self.current_game_type)
             self.num_static_evals_this_turn += 1
             self.num_leaves_explored_this_turn += 1
+
+            if use_zobrist_hashing and zobrist_hash is not None:
+                self.transposition_table[zobrist_hash] = (val, None, depth)
+                self.zobrist_writes_this_turn += 1
             return (val, None, None)
 
         best_move = None
@@ -295,7 +305,6 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
         else:
             # minimizing
             value = float('inf')
@@ -310,13 +319,27 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
+
+        # storing scores for future references
+        if use_zobrist_hashing and zobrist_hash is not None:
+            self.transposition_table[zobrist_hash] = (value, best_move, depth)
+            self.zobrist_writes_this_turn += 1
+
+        return (value, best_move, best_state)
 
     def alphabeta_search_next(self, state, depth, alpha, beta):
         """
         The recursive inner part of alpha-beta search.
         Returns (value, best_move, best_state).
         """
+        zobrist_hash = None
+        if self.transposition_table is not None:
+            zobrist_hash = self.compute_zobrist_hash(state)
+            self.zobrist_read_attempts_this_turn += 1
+            if zobrist_hash in self.transposition_table:
+                self.zobrist_hits_this_turn += 1
+                return self.transposition_table[zobrist_hash]
+            
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
         who = state.whose_move
@@ -329,6 +352,11 @@ class OurAgent(KAgent):
 
             self.num_static_evals_this_turn += 1
             self.num_leaves_explored_this_turn += 1
+            # storing scores at the leaf level
+            if zobrist_hash is not None:
+                self.transposition_table[zobrist_hash] = (val, None, depth)
+                self.zobrist_writes_this_turn += 1
+
             return (val, None, None)
 
         if who == 'X':
@@ -347,7 +375,6 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
         else:
             # Minimizing
             value = float('inf')
@@ -364,7 +391,11 @@ class OurAgent(KAgent):
                 if alpha >= beta:
                     self.num_alpha_beta_cutoffs_this_turn += 1
                     break
-            return (value, best_move, best_state)
+        if zobrist_hash is not None:
+            self.transposition_table[zobrist_hash] = (value, best_move, depth)
+            self.zobrist_writes_this_turn += 1
+
+        return (value, best_move, best_state)
 
     def get_legal_moves(self, state):
         """
@@ -387,7 +418,8 @@ class OurAgent(KAgent):
         (which is (row, col)) in 'state'.
         """
         # Create a new state using the 'old' argument
-        new_state = State(old=state)  # Correctly passing the current state as 'old'
+        new_state = copy.deepcopy(state)
+        # new_state = State(old=state)  # Correctly passing the current state as 'old'
         
         row, col = move
         new_state.board[row][col] = state.whose_move  # Apply the move
@@ -494,7 +526,7 @@ class OurAgent(KAgent):
             return
         
         nR, nC = self.current_game_type.n, self.current_game_type.m
-        pieces = ['X', 'O', ' ']
+        pieces = ['X', 'O', ' ', '-']
 
         self.zobrist_table = {}
         for r in range(nR):
@@ -512,6 +544,8 @@ class OurAgent(KAgent):
                 piece = board[r][c]
                 if piece in self.zobrist_table[(r, c)]:
                     hash_value ^= self.zobrist_table[(r, c)][piece]
+                else:
+                    print(f"⚠️ WARNING: Zobrist table missing entry for ({r}, {c})")  
 
         return hash_value
     
