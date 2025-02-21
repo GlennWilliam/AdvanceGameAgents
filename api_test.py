@@ -1,4 +1,4 @@
-from A2377948_KInARow import OurAgent
+from lezhiliu_KInARow import OurAgent
 from game_types import TTT
 
 agent = OurAgent()

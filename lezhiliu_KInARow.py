@@ -1,5 +1,5 @@
 '''
-A2377948_KInARow.py
+lezhiliu_KInARow.py
 Authors: William, Glenn; Liu, Lezhi
 
 An agent for playing "K-in-a-Row with Forbidden Squares" and related games.
@@ -34,23 +34,24 @@ class OurAgent(KAgent):
         self.persona = 'Annoying'
         self.voice_info = {'Chrome': 10, 'Firefox': 2, 'other': 0}
         self.playing = "don't know yet" # e.g., "X" or "O".
-        self.alpha_beta_cutoffs_this_turn = -1
-        self.num_static_evals_this_turn = -1
-        self.zobrist_table_num_entries_this_turn = 0
-        self.zobrist_table_num_hits_this_turn = 0
-        self.zobrist_writes_this_turn = 0 
+
         self.current_game_type = None
         self.game_history = []
         self.apis_ok = False
-        
-        self.zobrist_table = {}
-        self.transposition_table = {}
 
-        # Track statistics for the final remark:
         self.num_static_evals_this_turn = 0
         self.num_alpha_beta_cutoffs_this_turn = 0
         self.num_leaves_explored_this_turn = 0
         self.num_nodes_expanded_this_turn = 0
+
+        self.zobrist_read_attempts_this_turn = 0
+        self.zobrist_hits_this_turn = 0
+        self.zobrist_writes_this_turn = 0
+        self.use_zobrist_hashing = False
+        
+        self.zobrist_table = {}
+        self.transposition_table = {}
+
 
     def introduce(self):
         intro = (f"Ah, so you've chosen to challenge me? A bold move, but ultimately a futile one.\n"
@@ -73,7 +74,9 @@ class OurAgent(KAgent):
                                           # or something simple and quick to compute
                                           # and do not import any LLM or special APIs.
                                           # During the tournament, this will be False..
-            apis_ok=True):      
+            apis_ok=True,
+            use_move_ordering=True,
+            use_zobrist_hashing = True):      
         """
         The game master calls this once before the game starts (and may call it again
         in mid-game if parameters change).
@@ -87,6 +90,8 @@ class OurAgent(KAgent):
         self.time_per_move = expected_time_per_move
         self.utterances_matter = utterances_matter
         self.apis_ok = apis_ok
+        self.use_move_ordering = use_move_ordering
+        self.use_zobrist_hashing = use_zobrist_hashing
         self.init_zobrist_table()
 
         return 'OK'
@@ -105,6 +110,20 @@ class OurAgent(KAgent):
         out to max_ply. We call the special_static_eval_fn if provided (for autograding),
         else we call self.static_eval().
         """
+
+        if autograding:
+            self.use_move_ordering = False
+
+        zobrist_hash = None
+        if use_zobrist_hashing:
+            zobrist_hash = self.compute_zobrist_hash(current_state)
+            self.zobrist_read_attempts_this_turn += 1
+            if zobrist_hash in self.transposition_table:
+                self.zobrist_hits_this_turn += 1
+                cached_score, cached_move, cached_depth = self.transposition_table[zobrist_hash]
+                if cached_depth >= max_ply:
+                    return [[cached_move, self.apply_move(current_state, cached_move)],
+                            f"Using cached move: {cached_move} (Depth={cached_depth})"]
 
         # Capture statistics from the previous turn before resetting
         if self.game_history:
@@ -133,31 +152,56 @@ class OurAgent(KAgent):
 
         # Ensure my_eval_function is always initialized
         if special_static_eval_fn is not None:
-            self.my_eval_function = special_static_eval_fn  # For autograding
+            if special_static_eval_fn.__code__.co_argcount == 1:
+                def my_evaluator(st, gt):
+                    return special_static_eval_fn(st)
+            else:
+                def my_evaluator(st, gt):
+                    return special_static_eval_fn(st, gt)
+            self.my_eval_function = my_evaluator
         else:
-            self.my_eval_function = self.static_eval  
+            self.my_eval_function = self.static_eval
 
-        try:
-            while current_depth <= max_ply:
-                if time.time() - start_time >= time_limit:
-                    raise TimeoutException()
-                if use_alpha_beta:
-                    algorithm = "alpha-beta"
-                    score, move, state = self.alphabeta_search(current_state, current_depth, float('-inf'), float('inf'))
-                else:
-                    algorithm = "minimax"
-                    score, move, state = self.minimax_search(current_state, current_depth)
-                best_score = score
-                best_move, best_state = move, state
-                current_depth += 1
-        except TimeoutException:
-            print("Time limit reached, returning best move from last complete search depth.")
+        # iterative deepening only for not autograding to ensure correct number of expansions
+        if autograding:
+            if use_alpha_beta:
+                algorithm = "alpha-beta"
+                best_score, best_move, best_state = self.alphabeta_search(
+                    current_state, max_ply, float('-inf'), float('inf')
+                )
+            else:
+                algorithm = "minimax"
+                best_score, best_move, best_state = self.minimax_search(
+                    current_state, max_ply
+                )
+        else:
+            try:
+                while current_depth <= max_ply:
+                    if time.time() - start_time >= time_limit:
+                        raise TimeoutException()
+                    if use_alpha_beta:
+                        algorithm = "alpha-beta"
+                        score, move, state = self.alphabeta_search(current_state, current_depth, float('-inf'), float('inf'))
+                    else:
+                        algorithm = "minimax"
+                        score, move, state = self.minimax_search(current_state, current_depth)
+                    best_score = score
+                    best_move, best_state = move, state
+                    current_depth += 1
+            except TimeoutException:
+                print("Time limit reached, returning best move from last complete search depth.")
+        
+
 
         if best_move is None:
             legal_moves = self.get_legal_moves(current_state)
             best_move = legal_moves[0] if legal_moves else None
             best_state = self.apply_move(current_state, best_move) if best_move is not None else current_state
 
+        if use_zobrist_hashing and zobrist_hash is not None:
+            self.transposition_table[zobrist_hash] = (best_score, best_move, max_ply)
+            self.zobrist_writes_this_turn += 1
+        
         # Update game history with current move
         new_stats_summary = (
             f"I evaluated {self.num_static_evals_this_turn} states, "
@@ -178,63 +222,19 @@ class OurAgent(KAgent):
         self.game_history.append((best_move, copy.deepcopy(current_state), final_utterance, new_stats_summary))
 
         return [[best_move, best_state], final_utterance]
-        
-        # if use_zobrist_hashing:
-        #     zobrist_hash = self.compute_zobrist_hash(current_state)
-        #     self.zobrist_read_attempts_this_turn += 1
-        #     if zobrist_hash in self.transposition_table:
-        #         self.zobrist_hits_this_turn += 1
-        #         best_move, best_score, depth = self.transposition_table[zobrist_hash]
-        #         return [[best_move, self.apply_move(current_state, best_move)],
-        #                 f"Using cached evaluation: {best_score} (depth={depth})"]
-
-        # # Now call minimax
-        # best_score, best_move, resulting_state = self.minimax_wrapper(
-        #     current_state, 
-        #     depth=max_ply,
-        #     use_alpha_beta=use_alpha_beta,
-        #     use_zobrist_hashing=use_zobrist_hashing
-        # )
-
-
-        # if zobrist_hash is not None:
-        #     self.transposition_table[zobrist_hash] = (best_move, best_score, max_ply)
-        #     self.zobrist_writes_this_turn += 1
-
-        # # Construct a remark about the search process:
-        # new_remark = (f"My {'alpha-beta' if use_alpha_beta else 'minimax'} search "
-        #             f"expanded {self.num_nodes_expanded_this_turn} nodes and "
-        #             f"performed {self.num_static_evals_this_turn} static evaluations "
-        #             f"with {self.num_alpha_beta_cutoffs_this_turn} alpha-beta cutoffs. "
-        #             f"Zobrist: {self.zobrist_hits_this_turn}/{self.zobrist_read_attempts_this_turn} hits, "
-        #             f"{self.zobrist_writes_this_turn} writes. "
-        #             f"I choose move {best_move}!")
-
-        # utterance = self.generate_utterance(current_state, current_remark, best_move, new_remark)
-
-        # # if self.apis_ok:
-        # #     response_text = self.generate_response(
-        # #         f"I'm playing {self.current_game_type.short_name}. My last move was {best_move}. "
-        # #         f"{new_remark} How would a strategic AI respond to its opponent? Limit your response to seven sentences."
-        # #     )
-        # # else:
-        # #     response_text = f"{new_remark} Let's see what you do next!"
-            
-
-        # # If for some reason we did not find any legal moves, just return "pass":
-        # if best_move is None:
-        #     return [[None, current_state], "I cannot move!"]
-        
-        # self.game_history.append((best_move, current_state.whose_move))
-
-        # # Apply the chosen move to get the new state:
-        # new_state = self.apply_move(current_state, best_move)
-        # return [[best_move, resulting_state], utterance]
 
     def alphabeta_search(self, state, depth, alpha, beta):
         # Check for time limit in every recursive call.
         if time.time() - self.search_start_time >= self.allowed_time:
             raise TimeoutException("Time limit exceeded")
+        
+        zobrist_hash = None
+        if self.use_zobrist_hashing:
+            zobrist_hash = self.compute_zobrist_hash(state)
+            if zobrist_hash in self.transposition_table:
+                cached_score, cached_move, cached_depth = self.transposition_table[zobrist_hash]
+                if cached_depth >= depth:
+                    return cached_score, cached_move, state
             
         moves = self.get_legal_moves(state)
         self.num_nodes_expanded_this_turn += 1
@@ -242,9 +242,22 @@ class OurAgent(KAgent):
 
         if not moves or depth == 0:
             val = self.my_eval_function(state, self.current_game_type)
-            self.num_static_evals_this_turn += 1
+            self.num_static_evals_this_turn += 1 
             self.num_leaves_explored_this_turn += 1
             return (val, None, None)
+        
+        # move ordering, this quick evaluation does not count as exploring a leaf
+        if self.use_move_ordering:
+            scored_moves = []
+            for move in moves:
+                next_state = self.apply_move(state, move)
+                quick_val = self.my_eval_function(next_state, self.current_game_type)
+                scored_moves.append( (quick_val, move) )
+
+            reverse_order = (who == 'X')
+            scored_moves.sort(key=lambda x: x[0], reverse=reverse_order)
+            
+            moves = [pair[1] for pair in scored_moves]
 
         best_move = None
         best_state = None
@@ -551,6 +564,11 @@ class OurAgent(KAgent):
             for c in range(nC):
                 self.zobrist_table[(r, c)] = {p: random.getrandbits(64) for p in pieces}
 
+        self.player_to_move_zobrist = {
+            'X': random.getrandbits(64),
+            'O': random.getrandbits(64)
+        }
+
     
     def compute_zobrist_hash(self, state):
         hash_value = 0
@@ -560,10 +578,15 @@ class OurAgent(KAgent):
         for r in range(nR):
             for c in range(nC):
                 piece = board[r][c]
-                if piece in self.zobrist_table[(r, c)]:
+                if (r, c) in self.zobrist_table and piece in self.zobrist_table[(r, c)]:
                     hash_value ^= self.zobrist_table[(r, c)][piece]
                 else:
-                    print(f"⚠️ WARNING: Zobrist table missing entry for ({r}, {c})")  
+                    print(f"⚠️ WARNING: Zobrist table missing entry for ({r}, {c}) or piece '{piece}'")
+        
+        if state.whose_move in self.player_to_move_zobrist:
+            hash_value ^= self.player_to_move_zobrist[state.whose_move]
+        else:
+            print(f"⚠️ WARNING: Unexpected whose_move value: {state.whose_move}")
 
         return hash_value
         

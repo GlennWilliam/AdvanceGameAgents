@@ -188,7 +188,7 @@ def test():
     # which is a "twin".
 
     #import yourUWNetID_KInARow as h
-    from A2377948_KInARow import OurAgent
+    from lezhiliu_KInARow import OurAgent
     px = OurAgent()
     po = OurAgent(twin=True)
     set_players(px, po)
