@@ -1,5 +1,5 @@
 '''
-A2377948_KInARow.py
+glennwil_lezhiliu_KInARow.py
 Authors: William, Glenn; Liu, Lezhi
 
 An agent for playing "K-in-a-Row with Forbidden Squares" and related games.
@@ -73,8 +73,8 @@ class OurAgent(KAgent):
                                           # or something simple and quick to compute
                                           # and do not import any LLM or special APIs.
                                           # During the tournament, this will be False..
-            apis_ok=False,
-            use_move_ordering=False,
+            apis_ok=True,
+            use_move_ordering=True,
             use_zobrist_hashing = True):      
         """
         The game master calls this once before the game starts (and may call it again
@@ -103,7 +103,7 @@ class OurAgent(KAgent):
                   autograding=False,
                   use_alpha_beta=True,
                   use_zobrist_hashing=True,
-                  max_ply=4,
+                  max_ply=3,
                   special_static_eval_fn=None):
         """
         The heart of the agent. We do a single depth-limited minimax (or alpha-beta)
@@ -558,7 +558,7 @@ class OurAgent(KAgent):
         who = state.whose_move
         for m in moves:
             self.apply_move_in_place(state, m)  # make the move
-            quick_score = self.static_eval(state)
+            quick_score = self.quick_eval(state)
             self.undo_move_in_place(state, m)   # undo it
 
             # For X's turn, higher = better. For O's turn, lower = better.
@@ -723,7 +723,7 @@ class OurAgent(KAgent):
         elif "what's your take on the game so far" in opponent_remark:
             return self.game_so_far_summary()
 
-        # 3. Otherwise, produce a default or "normal" snarky/troll utterance
+        # Otherwise, produce a default or "normal" snarky/troll utterance
         else:
             # Banks of snarky/troll utterances
             bank_1 = [
@@ -796,7 +796,7 @@ class OurAgent(KAgent):
                     f"Respond in 3 sentences, dripping with arrogance and be annoying.\n")
         try:
             # Replace with your actual API key
-            api_key = "TODO"
+            api_key = # TODO
 
             # Configure the API key
             genai.configure(api_key=api_key)

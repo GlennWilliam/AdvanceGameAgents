@@ -37,7 +37,7 @@ python3 autograder.py
 '''
 
 import game_types
-import A2377948_KInARow as agent_module
+import glennwil_lezhiliu_KInARow as agent_module
 import spec_static_by_table
 
 
